@@ -31,8 +31,16 @@ function config() {
   if (!/^https:\/\/[^\s]+$/.test(base)) base = repo ? `https://raw.githubusercontent.com/${repo}/${rama}` : '';
   // FTP_URL = dirección pública de la carpeta FTP_DIR (feed automático). En GitHub Actions llega como variable.
   const ftpUrl = String(process.env.FTP_URL || c.FTP_URL || '').trim().replace(/\/+$/, '');
+  // PAGES_URL = raíz pública del repo que sirve GitHub Pages. En Actions sale sola del propio repo.
+  let pages = String(process.env.PAGES_URL || c.PAGES_URL || '').trim().replace(/\/+$/, '');
+  if (!pages && /^[\w.-]+\/[\w.-]+$/.test(process.env.GITHUB_REPOSITORY || '')) {
+    const [o, r] = process.env.GITHUB_REPOSITORY.split('/');
+    pages = `https://${o.toLowerCase()}.github.io/${r}`;
+  }
+  if (!/^https?:\/\/[^\s"<>]+$/.test(pages)) pages = '';
+  const ftp = /^https?:\/\/[^\s"<>]+$/.test(ftpUrl) ? ftpUrl : '';
   return { token: c.GITHUB_TOKEN || '', repo, rama, base, api: (process.env.GITHUB_API || 'https://api.github.com').replace(/\/+$/, ''),
-    ftpUrl: /^https?:\/\/[^\s"<>]+$/.test(ftpUrl) ? ftpUrl : '' };
+    ftpUrl: ftp, pagesUrl: pages, raiz: pages || ftp };
 }
 const listo = c => !!(c.token && c.repo);
 
@@ -119,7 +127,9 @@ async function subir(slug, c) {
 // Trabajo de cada corrida: <proyecto>/publicado/_auto/<slug>/ (img/ solo con lo dibujado en esta corrida,
 // estado.json = lo que hay en el hosting, estado.nuevo.json = lo que habrá al terminar de subir).
 const RECETAS = path.join(__dirname, '..', 'auto', 'recetas');
-const AUTO = path.join(PUB, '_auto');
+// PAGES_DIR mueve el trabajo al repo que publica GitHub Pages: <PAGES_DIR>/<tienda>/<nombre>/{img,feed.csv,estado.json}.
+// Así lo que dibuja el navegador cae ya en su sitio definitivo y el workflow solo tiene que hacer commit.
+const AUTO = process.env.PAGES_DIR ? path.resolve(process.env.PAGES_DIR) : path.join(PUB, '_auto');
 const dirAuto = slug => path.join(AUTO, slug);
 const CAMP = /^C\d{2}(0[1-9]|1[0-2])_[A-Z0-9]+(_[A-Z0-9]+)?$/; // igual que CAMPAIGN_RE de config.js
 const FIRMA = /^[0-9a-f]{64}$/;
@@ -158,7 +168,7 @@ function infoReceta(slug, c) {
     activo: receta.activo !== false, horas: Array.isArray(receta.horas) && receta.horas.length ? receta.horas : HORAS_DEF,
     guardada: receta.guardada || '', productos: estado ? Object.keys(estado.productos || {}).length : 0,
     actualizado: (estado && estado.actualizado) || '', generando: generando(slug),
-    ultimo_manual: manual || null, url_publica: c.ftpUrl ? c.ftpUrl + '/' + slug + '/feed.csv' : '',
+    ultimo_manual: manual || null, url_publica: c.raiz ? c.raiz + '/' + slug + '/feed.csv' : '',
   };
 }
 
