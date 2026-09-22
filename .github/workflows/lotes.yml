@@ -1,0 +1,88 @@
+# Lote grande: genera las piezas de una campaña para el catálogo completo, repartido en varias partes.
+# En el repo va como .github/workflows/lotes.yml (lo copia app/armar-repo.js).
+#
+# Por qué acá y no en el navegador de la oficina: medido el 2026-09-22 desde Lima, la tubería de esa
+# máquina da 0,3-1,6 Mbps contra un CDN neutral, y bajar las 15.619 fotos del catálogo de La Curacao
+# (625 MB) se lleva ~55 min de los ~1 h 45 que tarda el lote entero. En un runner esa espera no existe.
+#
+# Cómo se usa:
+#   1. En la Fábrica, bloque «Generar lote», botón «Encargar a GitHub». Eso escribe auto/pedidos/<id>.json.
+#   2. ARMAR-REPO.bat y subir el repo (igual que con las recetas de los feeds).
+#   3. Acá: Actions > Lote grande > Run workflow, y poner el id del pedido.
+#   4. Al terminar, cada parte queda como artefacto de la corrida: GitHub los entrega ya en ZIP.
+#
+# No lleva secretos: no sube nada por FTP ni toca el hosting.
+name: Lote grande
+
+on:
+  workflow_dispatch:
+    inputs:
+      id:
+        description: 'id del pedido (auto/pedidos/<id>.json)'
+        required: true
+      partes:
+        description: 'en cuántas partes repartirlo (vacío = lo que diga el pedido; máximo 20)'
+        required: false
+      limite:
+        description: 'solo para probar: cortar el feed a N productos'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  preparar:
+    runs-on: ubuntu-latest
+    outputs:
+      partes: ${{ steps.p.outputs.partes }}
+      de: ${{ steps.p.outputs.de }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: p
+        env:
+          PEDIDO: ${{ github.event.inputs.id }}
+          PARTES: ${{ github.event.inputs.partes }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const id = process.env.PEDIDO || "";
+            if (!/^[A-Za-z0-9][A-Za-z0-9_-]{2,79}$/.test(id)) { console.error("id no válido: " + id); process.exit(1); }
+            const f = "auto/pedidos/" + id + ".json";
+            if (!fs.existsSync(f)) { console.error("No existe " + f + ". ¿Subiste el repo con ARMAR-REPO.bat?"); process.exit(1); }
+            const p = JSON.parse(fs.readFileSync(f, "utf8"));
+            const de = Math.min(20, Math.max(1, Math.round(Number(process.env.PARTES) || Number(p.partes) || 1)));
+            const lista = Array.from({ length: de }, (_, i) => i);
+            console.log("Campaña " + p.campaign_id + " · formatos " + (p.formatos || []).join(", ") + " · " + de + " partes");
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, "partes=" + JSON.stringify(lista) + "\nde=" + de + "\n");
+          '
+
+  parte:
+    needs: preparar
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        parte: ${{ fromJson(needs.preparar.outputs.partes) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Fuentes (Arial se reemplaza por Liberation Sans, de las mismas medidas)
+        run: sudo apt-get install -y -qq fonts-liberation > /dev/null
+      - name: Dibujar la parte
+        env:
+          PEDIDO: ${{ github.event.inputs.id }}
+          PARTE: ${{ matrix.parte }}
+          DE: ${{ needs.preparar.outputs.de }}
+          LIMITE: ${{ github.event.inputs.limite }}
+        run: |
+          node app/lote.js "$PEDIDO" --parte "$PARTE" --de "$DE" ${LIMITE:+--limite "$LIMITE"}
+      - name: Guardar las piezas
+        uses: actions/upload-artifact@v4
+        with:
+          name: lote-${{ github.event.inputs.id }}-parte${{ matrix.parte }}
+          path: publicado/_lotes/${{ github.event.inputs.id }}/parte${{ matrix.parte }}
+          retention-days: 14
+          if-no-files-found: error

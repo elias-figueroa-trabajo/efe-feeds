@@ -1,0 +1,5 @@
+publicado/
+datos/
+publicar.env
+*.env
+node_modules/

@@ -1,0 +1,85 @@
+# Feed para Meta automático: dibuja las piezas del catálogo completo y las sube por FTP al hosting.
+# En el repo va como .github/workflows/feeds.yml (lo copia app/armar-repo.js).
+# Corre cada hora en punto; cada receta (auto/recetas/<tienda>/<nombre>.json) trae su propio horario
+# ("horas": ["HH:MM", ...] en hora de Lima) y se puede pausar ("activo": false) desde el panel «Mis feeds»
+# de la Fábrica, sin tocar este archivo. GitHub puede atrasar los cron programados unos minutos, y los
+# apaga si el repo pasa 60 días sin cambios (se reactivan desde la pestaña Actions).
+name: Feeds para Meta
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: 'tienda/nombre (vacío = todas las que tocan esta hora)'
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  recetas:
+    runs-on: ubuntu-latest
+    outputs:
+      lista: ${{ steps.l.outputs.lista }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: l
+        env:
+          SLUG_MANUAL: ${{ github.event.inputs.slug }}
+        run: |
+          HORA=$(TZ=America/Lima date +%H:00)
+          echo "Hora de Lima: $HORA"
+          lista=$(node -e '
+            const fs = require("fs"), path = require("path");
+            const hora = process.env.HORA, manual = (process.env.SLUG_MANUAL || "").trim();
+            const raiz = "auto/recetas";
+            const out = [];
+            for (const t of fs.existsSync(raiz) ? fs.readdirSync(raiz, { withFileTypes: true }) : []) {
+              if (!t.isDirectory()) continue;
+              for (const f of fs.readdirSync(path.join(raiz, t.name))) {
+                if (!f.endsWith(".json")) continue;
+                const slug = t.name + "/" + f.slice(0, -5);
+                if (manual) { if (slug === manual) out.push(slug); continue; }
+                let r; try { r = JSON.parse(fs.readFileSync(path.join(raiz, t.name, f), "utf8")); } catch { continue; }
+                if (r.activo === false) continue;
+                const horas = Array.isArray(r.horas) && r.horas.length ? r.horas : ["07:00", "15:00"];
+                if (horas.includes(hora)) out.push(slug);
+              }
+            }
+            console.log(JSON.stringify(out));
+          ')
+          echo "lista=$lista" >> "$GITHUB_OUTPUT"
+          echo "Recetas: $lista"
+
+  feed:
+    needs: recetas
+    if: needs.recetas.outputs.lista != '[]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      matrix:
+        slug: ${{ fromJson(needs.recetas.outputs.lista) }}
+    # Si una corrida se atrasa, la siguiente del mismo feed espera en vez de pisarla.
+    concurrency:
+      group: feed-${{ matrix.slug }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Fuentes (Arial se reemplaza por Liberation Sans, de las mismas medidas)
+        run: sudo apt-get install -y -qq fonts-liberation > /dev/null
+      - name: Dibujar y subir
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_DIR: ${{ secrets.FTP_DIR }}
+          FTP_URL: ${{ secrets.FTP_URL }}
+          FTP_TLS: ${{ secrets.FTP_TLS }}
+          FTP_INSEGURO: ${{ secrets.FTP_INSEGURO }}
+        run: node app/auto.js "${{ matrix.slug }}"
