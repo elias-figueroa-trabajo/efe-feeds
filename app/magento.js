@@ -53,28 +53,24 @@ async function opciones(cfg, cod) {
   return m;
 }
 
-// Stock por SKU en una sola llamada (MSI). Si la tienda no lo expone, se devuelve vacío y listo.
+// Stock por SKU. Magento solo lo da de a uno (el buscador de productos devuelve
+// stock_item vacío), así que va aparte y solo si la pantalla lo pide: son N pedidos.
 async function stockDe(cfg, skus) {
-  const m = new Map();
-  const q = new URLSearchParams({
-    'searchCriteria[filter_groups][0][filters][0][field]': 'sku',
-    'searchCriteria[filter_groups][0][filters][0][value]': skus.join(','),
-    'searchCriteria[filter_groups][0][filters][0][condition_type]': 'in',
-    'searchCriteria[pageSize]': String(skus.length * 4)
-  });
-  try {
-    const r = await fetch(cfg.base + '/rest/default/V1/inventory/source-items?' + q, {
-      headers: { Authorization: 'Bearer ' + cfg.token, Accept: 'application/json' },
-      redirect: 'error', signal: AbortSignal.timeout(20000)
-    });
-    if (!r.ok) return m;
-    for (const it of (await r.json()).items || []) {
-      const k = String(it.sku).toUpperCase(), ya = m.get(k) || { qty: 0, en_stock: false };
-      ya.qty += Number(it.quantity) || 0;
-      if (Number(it.status) === 1) ya.en_stock = true;
-      m.set(k, ya);
+  const m = new Map(), cola = skus.slice();
+  const uno = async () => {
+    for (let sku = cola.shift(); sku; sku = cola.shift()) {
+      try {
+        const r = await fetch(cfg.base + '/rest/default/V1/stockStatuses/' + encodeURIComponent(sku), {
+          headers: { Authorization: 'Bearer ' + cfg.token, Accept: 'application/json' },
+          redirect: 'error', signal: AbortSignal.timeout(20000)
+        });
+        if (!r.ok) continue;
+        const d = await r.json();
+        m.set(String(sku).toUpperCase(), { qty: Number(d.qty) || 0, en_stock: Number(d.stock_status) === 1 });
+      } catch { /* ese SKU se queda sin dato y la tabla lo dice */ }
     }
-  } catch { /* sin stock: la tabla lo muestra como «sin dato» */ }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, skus.length) }, uno));
   return m;
 }
 
@@ -175,7 +171,11 @@ async function magento(req, res, u, { local }) {
       return out(502, { error: 'Magento respondió ' + r.status + pista + (msg ? ': ' + msg.slice(0, 200) : '') });
     }
     const d = JSON.parse(txt);
-    const [etiquetas, stocks] = await Promise.all([opciones(cfg, 'brand'), stockDe(cfg, skus)]);
+    const conStock = u.searchParams.get('stock') === 'si';
+    const [etiquetas, stocks] = await Promise.all([
+      opciones(cfg, 'brand'),
+      conStock ? stockDe(cfg, skus) : Promise.resolve(null)
+    ]);
     const items = (d.items || []).map(p => normalizar(p, cfg.base, etiquetas, stocks));
     const vistos = new Set(items.map(i => String(i.sku).toUpperCase()));
     out(200, { amb, total: d.total_count ?? items.length, items, faltan: skus.filter(s => !vistos.has(s.toUpperCase())) });
