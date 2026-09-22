@@ -35,6 +35,49 @@ function ambiente(c, amb) {
   return { base, token };
 }
 
+// Etiquetas de atributos de selección (brand/marca/manufacturer vienen como id de opción).
+// Se piden una vez por ambiente y se guardan 1 h: son pocas y casi nunca cambian.
+const CACHE_OPC = new Map();
+async function opciones(cfg, cod) {
+  const k = cfg.base + '|' + cod, ya = CACHE_OPC.get(k);
+  if (ya && Date.now() - ya.t < 3600e3) return ya.m;
+  const m = new Map();
+  try {
+    const r = await fetch(cfg.base + '/rest/default/V1/products/attributes/' + cod + '/options', {
+      headers: { Authorization: 'Bearer ' + cfg.token, Accept: 'application/json' },
+      redirect: 'error', signal: AbortSignal.timeout(20000)
+    });
+    if (r.ok) for (const o of await r.json()) if (o && o.value) m.set(String(o.value), String(o.label || ''));
+  } catch { /* si falla, se queda el id: mejor eso que romper la consulta */ }
+  CACHE_OPC.set(k, { t: Date.now(), m });
+  return m;
+}
+
+// Stock por SKU en una sola llamada (MSI). Si la tienda no lo expone, se devuelve vacío y listo.
+async function stockDe(cfg, skus) {
+  const m = new Map();
+  const q = new URLSearchParams({
+    'searchCriteria[filter_groups][0][filters][0][field]': 'sku',
+    'searchCriteria[filter_groups][0][filters][0][value]': skus.join(','),
+    'searchCriteria[filter_groups][0][filters][0][condition_type]': 'in',
+    'searchCriteria[pageSize]': String(skus.length * 4)
+  });
+  try {
+    const r = await fetch(cfg.base + '/rest/default/V1/inventory/source-items?' + q, {
+      headers: { Authorization: 'Bearer ' + cfg.token, Accept: 'application/json' },
+      redirect: 'error', signal: AbortSignal.timeout(20000)
+    });
+    if (!r.ok) return m;
+    for (const it of (await r.json()).items || []) {
+      const k = String(it.sku).toUpperCase(), ya = m.get(k) || { qty: 0, en_stock: false };
+      ya.qty += Number(it.quantity) || 0;
+      if (Number(it.status) === 1) ya.en_stock = true;
+      m.set(k, ya);
+    }
+  } catch { /* sin stock: la tabla lo muestra como «sin dato» */ }
+  return m;
+}
+
 const atributo = (p, cod) => {
   const a = (p.custom_attributes || []).find(x => x.attribute_code === cod);
   return a ? a.value : null;
@@ -54,12 +97,15 @@ function especialVigente(p, precio) {
   return sp;
 }
 
-function normalizar(p, base) {
+function normalizar(p, base, etiquetas, stocks) {
   const precio = numero(p.price);
   const galeria = (p.media_gallery_entries || []).filter(m => m.media_type === 'image' && !m.disabled);
   const principal = galeria.find(m => (m.types || []).includes('image')) || galeria[0];
   const archivo = (principal && principal.file) || atributo(p, 'image') || '';
-  const stock = p.extension_attributes && p.extension_attributes.stock_item;
+  const stockItem = p.extension_attributes && p.extension_attributes.stock_item;
+  const msi = stocks && stocks.get(String(p.sku).toUpperCase());
+  const stock = msi || (stockItem ? { qty: stockItem.qty, en_stock: !!stockItem.is_in_stock } : null);
+  const marcaId = atributo(p, 'brand') || atributo(p, 'marca') || atributo(p, 'manufacturer') || '';
   return {
     sku: p.sku,
     name: p.name || '',
@@ -74,8 +120,8 @@ function normalizar(p, base) {
     status: p.status === 1 ? 'activo' : 'inactivo',
     visibility: p.visibility,
     type: p.type_id,
-    brand: atributo(p, 'brand') || atributo(p, 'marca') || atributo(p, 'manufacturer') || '',
-    stock: stock ? { qty: stock.qty, en_stock: !!stock.is_in_stock } : null,
+    brand: (etiquetas && etiquetas.get(String(marcaId))) || marcaId,
+    stock: stock ? { qty: stock.qty, en_stock: !!stock.en_stock } : null,
     descripcion: textoPlano(atributo(p, 'short_description') || atributo(p, 'description')).slice(0, 400),
     actualizado: p.updated_at || ''
   };
@@ -129,7 +175,8 @@ async function magento(req, res, u, { local }) {
       return out(502, { error: 'Magento respondió ' + r.status + pista + (msg ? ': ' + msg.slice(0, 200) : '') });
     }
     const d = JSON.parse(txt);
-    const items = (d.items || []).map(p => normalizar(p, cfg.base));
+    const [etiquetas, stocks] = await Promise.all([opciones(cfg, 'brand'), stockDe(cfg, skus)]);
+    const items = (d.items || []).map(p => normalizar(p, cfg.base, etiquetas, stocks));
     const vistos = new Set(items.map(i => String(i.sku).toUpperCase()));
     out(200, { amb, total: d.total_count ?? items.length, items, faltan: skus.filter(s => !vistos.has(s.toUpperCase())) });
   } catch (e) {
